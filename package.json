@@ -1,7 +1,7 @@
 {
   "name": "gemini-meet-pro",
-  "private": true,
   "homepage": "https://wz1310.github.io/meet_pro",
+  "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
