@@ -65,7 +65,6 @@ const VideoTile = memo(
 
     const isPresentation =
       name.toLowerCase().includes("presentasi") || isScreenSharing;
-    // Fit object based on type: contain for presentations, cover for faces
     const videoFitClass = isPresentation
       ? "object-contain bg-[#1a1c1e]"
       : isLocal
@@ -104,9 +103,8 @@ const VideoTile = memo(
           </div>
         )}
 
-        {/* Label Peserta dengan Style Glassmorphism */}
         <div
-          className={`absolute bottom-2 left-2 flex items-center gap-1.5 bg-black/40 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10 ${
+          className={`absolute bottom-2 left-2 flex items-center gap-1.5 bg-black/40 backdrop-blur-md px-2 py-0.5 rounded-full border border-white/10 ${
             mini ? "scale-90 origin-left" : ""
           } z-10`}
         >
@@ -116,7 +114,7 @@ const VideoTile = memo(
             ) : (
               <MicOff className="h-3 w-3 text-red-500" />
             ))}
-          <span className="text-[10px] md:text-xs font-medium text-white/90 truncate max-w-[70px] md:max-w-[150px]">
+          <span className="text-[10px] md:text-xs font-medium text-white/90 truncate max-w-[60px] md:max-w-[150px]">
             {isLocal ? "Anda" : name}
           </span>
         </div>
@@ -158,9 +156,12 @@ const App: React.FC = () => {
   );
   const [pinnedId, setPinnedId] = useState<string | null>(null);
 
-  // Perizinan States
   const [isRequesting, setIsRequesting] = useState(false);
   const [pendingRequests, setPendingRequests] = useState<JoinRequest[]>([]);
+
+  // Timer State
+  const [meetingDuration, setMeetingDuration] = useState("00:00");
+  const meetingStartTimeRef = useRef<number | null>(null);
 
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
@@ -168,6 +169,37 @@ const App: React.FC = () => {
   const screenPeerRef = useRef<any>(null);
   const activeCallsRef = useRef<Map<string, any>>(new Map());
   const activePeersRef = useRef<Set<string>>(new Set());
+  const dataConnsRef = useRef<Map<string, any>>(new Map());
+
+  // Meeting Duration Timer Effect
+  useEffect(() => {
+    let interval: number;
+    if (inMeeting) {
+      interval = window.setInterval(() => {
+        if (meetingStartTimeRef.current) {
+          const diff = Math.floor(
+            (Date.now() - meetingStartTimeRef.current) / 1000
+          );
+          const positiveDiff = Math.max(0, diff); // Mencegah angka negatif jika ada clock skew kecil
+          const hours = Math.floor(positiveDiff / 3600);
+          const minutes = Math.floor((positiveDiff % 3600) / 60);
+          const seconds = positiveDiff % 60;
+
+          let durationString = "";
+          if (hours > 0)
+            durationString += `${hours.toString().padStart(2, "0")}:`;
+          durationString += `${minutes.toString().padStart(2, "0")}:${seconds
+            .toString()
+            .padStart(2, "0")}`;
+
+          setMeetingDuration(durationString);
+        }
+      }, 1000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [inMeeting]);
 
   const removeParticipant = (id: string) => {
     setRemoteParticipants((prev) => prev.filter((p) => p.id !== id));
@@ -175,6 +207,7 @@ const App: React.FC = () => {
     activeCallsRef.current.get(id)?.close();
     activeCallsRef.current.delete(id);
     activePeersRef.current.delete(id.replace("-screen", ""));
+    dataConnsRef.current.delete(id);
   };
 
   const addParticipant = (
@@ -189,9 +222,7 @@ const App: React.FC = () => {
       (isPresentation ? `User ${baseName} (Presentasi)` : `User ${baseName}`);
 
     stream.getTracks().forEach((track) => {
-      track.onended = () => {
-        removeParticipant(id);
-      };
+      track.onended = () => removeParticipant(id);
     });
 
     setRemoteParticipants((prev) => {
@@ -223,11 +254,27 @@ const App: React.FC = () => {
           if (data.type === "JOIN_APPROVED") {
             setIsRequesting(false);
             setInMeeting(true);
+
+            // Set waktu mulai dari Host agar sinkron
+            if (data.meetingStartTime) {
+              meetingStartTimeRef.current = data.meetingStartTime;
+            }
+
             if (localStreamRef.current) {
               const call = peer.call(targetId, localStreamRef.current, {
                 metadata: { name: nameToShare },
               });
               handleCall(call, targetId);
+            }
+            if (data.existingPeers && Array.isArray(data.existingPeers)) {
+              data.existingPeers.forEach((p: { id: string; name: string }) => {
+                if (p.id !== openedId && localStreamRef.current) {
+                  const call = peer.call(p.id, localStreamRef.current, {
+                    metadata: { name: nameToShare },
+                  });
+                  handleCall(call, p.id);
+                }
+              });
             }
           } else if (data.type === "JOIN_REJECTED") {
             setIsRequesting(false);
@@ -239,6 +286,7 @@ const App: React.FC = () => {
     });
 
     peer.on("connection", (conn: any) => {
+      dataConnsRef.current.set(conn.peer, conn);
       conn.on("data", (data: any) => {
         if (data.type === "JOIN_REQUEST") {
           setPendingRequests((prev) => [
@@ -247,18 +295,20 @@ const App: React.FC = () => {
           ]);
         }
       });
+      conn.on("close", () => dataConnsRef.current.delete(conn.peer));
     });
 
     peer.on("call", (call: any) => {
-      if (call.peer.includes("-screen") || isScreenSharing) {
-        call.answer(isScreenSharing ? screenStreamRef.current : null, {
+      const isPresentationCall =
+        call.peer.includes("-screen") || isScreenSharing;
+      call.answer(
+        isPresentationCall
+          ? screenStreamRef.current || null
+          : localStreamRef.current,
+        {
           metadata: { name: nameToShare },
-        });
-      } else {
-        call.answer(localStreamRef.current, {
-          metadata: { name: nameToShare },
-        });
-      }
+        }
+      );
       handleCall(call, call.peer);
     });
 
@@ -267,14 +317,12 @@ const App: React.FC = () => {
         setError("Rapat tidak ditemukan atau Host sudah keluar.");
         setIsRequesting(false);
       }
-      console.error(err);
     });
   };
 
   const handleCall = (call: any, remoteId: string) => {
     activeCallsRef.current.set(remoteId, call);
     activePeersRef.current.add(remoteId.replace("-screen", ""));
-
     call.on("stream", (remoteStream: MediaStream) => {
       if (remoteStream && remoteStream.getTracks().length > 0) {
         addParticipant(remoteId, remoteStream, call.metadata?.name);
@@ -282,10 +330,7 @@ const App: React.FC = () => {
         removeParticipant(remoteId);
       }
     });
-
-    call.on("close", () => {
-      removeParticipant(remoteId);
-    });
+    call.on("close", () => removeParticipant(remoteId));
   };
 
   const startLocalMedia = async () => {
@@ -310,6 +355,8 @@ const App: React.FC = () => {
       setMyId(code);
       setMyName("Host");
       setInMeeting(true);
+      // Host menentukan waktu mulai rapat
+      meetingStartTimeRef.current = Date.now();
       initPeer(code);
     } catch (e) {}
   };
@@ -331,7 +378,18 @@ const App: React.FC = () => {
   const approveRequest = (requestId: string) => {
     const request = pendingRequests.find((r) => r.id === requestId);
     if (request) {
-      request.connection.send({ type: "JOIN_APPROVED" });
+      const existingPeers = remoteParticipants.map((p) => ({
+        id: p.id,
+        name: p.name,
+      }));
+      existingPeers.push({ id: myId, name: myName });
+
+      request.connection.send({
+        type: "JOIN_APPROVED",
+        existingPeers: existingPeers,
+        // Kirim waktu mulai rapat ke user baru
+        meetingStartTime: meetingStartTimeRef.current,
+      });
       setPendingRequests((prev) => prev.filter((r) => r.id !== requestId));
     }
   };
@@ -379,31 +437,23 @@ const App: React.FC = () => {
         screenStreamRef.current = stream;
         setIsScreenSharing(true);
         setPinnedId("my-screen");
-
         const screenPeerId = `${myId}-screen`;
         const sPeer = new Peer(screenPeerId);
         screenPeerRef.current = sPeer;
-
         sPeer.on("open", () => {
           if (meetingCode && myId !== meetingCode) {
             sPeer.call(meetingCode, stream, {
               metadata: { name: myName + " (Presentasi)" },
             });
           }
-          if (myId === meetingCode) {
-            activePeersRef.current.forEach((guestId) => {
-              if (guestId !== myId)
-                sPeer.call(guestId, stream, {
-                  metadata: { name: myName + " (Presentasi)" },
-                });
-            });
-          }
+          activePeersRef.current.forEach((peerId) => {
+            if (peerId !== myId) {
+              sPeer.call(peerId, stream, {
+                metadata: { name: myName + " (Presentasi)" },
+              });
+            }
+          });
         });
-
-        sPeer.on("call", (call: any) => {
-          call.answer(stream, { metadata: { name: myName + " (Presentasi)" } });
-        });
-
         stream.getVideoTracks()[0].onended = () => {
           if (isScreenSharing) toggleScreenShare();
         };
@@ -572,21 +622,32 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Header */}
       <header className="flex h-12 md:h-16 items-center justify-between px-4 md:px-6 border-b border-gray-800/50 flex-shrink-0 z-30">
-        <div className="flex items-center gap-2 md:gap-3">
-          <div className="h-7 w-7 md:h-9 md:w-9 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
-            <VideoIcon className="text-white h-4 w-4 md:h-5 md:w-5" />
+        <div className="flex items-center gap-3 md:gap-4">
+          <div className="flex items-center gap-2 md:gap-3">
+            <div className="h-7 w-7 md:h-9 md:w-9 rounded-lg bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+              <VideoIcon className="text-white h-4 w-4 md:h-5 md:w-5" />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-sm md:text-lg font-bold leading-none tracking-tight">
+                Meet Pro
+              </span>
+              <span className="text-[7px] md:text-[10px] text-blue-400 font-bold tracking-widest uppercase mt-0.5">
+                Live Conference
+              </span>
+            </div>
           </div>
-          <div className="flex flex-col">
-            <span className="text-sm md:text-lg font-bold leading-none tracking-tight">
-              Fine Meet
-            </span>
-            <span className="text-[7px] md:text-[10px] text-blue-400 font-bold tracking-widest uppercase mt-0.5">
-              Live Conference
+
+          {/* Meeting Timer Display */}
+          <div className="h-6 w-[1px] bg-gray-700 mx-1 hidden sm:block"></div>
+          <div className="flex items-center gap-2 bg-white/5 px-2.5 py-1 rounded-full border border-white/5">
+            <Clock className="h-3 w-3 text-blue-400" />
+            <span className="text-xs md:text-sm font-mono font-bold text-gray-200">
+              {meetingDuration}
             </span>
           </div>
         </div>
+
         <div className="flex items-center gap-2 md:gap-3">
           <div className="flex items-center gap-1.5 bg-gray-800/60 backdrop-blur-md px-2.5 py-1 rounded-full border border-gray-700/50">
             <span className="text-[10px] md:text-sm font-bold tracking-widest text-blue-100">
@@ -605,13 +666,13 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Container */}
+      {/* Main Container dengan layout responsif grid */}
       <main className="flex-1 flex flex-col md:flex-row overflow-hidden p-2 md:p-3 gap-2 md:gap-3 min-h-0 relative">
-        {/* Stage Area - Main Focus */}
+        {/* Stage Area (Main Video / Share Screen) */}
         <div
           className={`transition-all duration-500 ease-in-out ${
-            isAnyPinned ? "h-[35vh] md:h-full md:flex-[4]" : "flex-1"
-          } min-h-0 flex-shrink-0`}
+            isAnyPinned ? "h-[40vh] md:h-full md:flex-[4]" : "flex-1"
+          } min-h-0 flex-shrink-0 z-10`}
         >
           {isAnyPinned ? (
             <VideoTile
@@ -668,58 +729,57 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* Sidebar / Participant Strip - Beautifully redesigned for mobile */}
+        {/* Sidebar / Participant Strip - Mobile: Grid 2 Columns, Desktop: Side Column */}
         {isAnyPinned && (
-          <div className="flex-shrink-0 flex md:flex-col md:w-1/4 lg:w-1/5 gap-2 overflow-x-auto md:overflow-y-auto scrollbar-hide pb-2 md:pb-0">
-            {pinnedId !== "me" && (
-              <div className="w-32 h-20 md:w-full md:h-36 lg:h-44 flex-shrink-0">
-                <VideoTile
-                  stream={localStreamRef.current}
-                  name={myName}
-                  isLocal={true}
-                  isMicOn={isMicOn}
-                  isCamOn={isCamOn}
-                  onPin={() => setPinnedId("me")}
-                  mini={true}
-                />
-              </div>
-            )}
-
-            {isScreenSharing && pinnedId !== "my-screen" && (
-              <div className="w-32 h-20 md:w-full md:h-36 lg:h-44 flex-shrink-0">
-                <VideoTile
-                  stream={screenStreamRef.current}
-                  name={`${myName} (Presentasi)`}
-                  isLocal={true}
-                  isCamOn={true}
-                  onPin={() => setPinnedId("my-screen")}
-                  mini={true}
-                />
-              </div>
-            )}
-
-            {remoteParticipants.map(
-              (participant) =>
-                pinnedId !== participant.id && (
-                  <div
-                    key={participant.id}
-                    className="w-32 h-20 md:w-full md:h-36 lg:h-44 flex-shrink-0"
-                  >
-                    <VideoTile
-                      stream={participant.stream}
-                      name={participant.name}
-                      onPin={() => setPinnedId(participant.id)}
-                      mini={true}
-                    />
-                  </div>
-                )
-            )}
+          <div className="flex-1 overflow-y-auto md:w-1/4 lg:w-1/5 scrollbar-hide">
+            <div className="grid grid-cols-2 md:grid-cols-1 gap-2 pb-4">
+              {pinnedId !== "me" && (
+                <div className="aspect-video md:h-36 lg:h-44 flex-shrink-0">
+                  <VideoTile
+                    stream={localStreamRef.current}
+                    name={myName}
+                    isLocal={true}
+                    isMicOn={isMicOn}
+                    isCamOn={isCamOn}
+                    onPin={() => setPinnedId("me")}
+                    mini={true}
+                  />
+                </div>
+              )}
+              {isScreenSharing && pinnedId !== "my-screen" && (
+                <div className="aspect-video md:h-36 lg:h-44 flex-shrink-0">
+                  <VideoTile
+                    stream={screenStreamRef.current}
+                    name={`${myName} (Presentasi)`}
+                    isLocal={true}
+                    isCamOn={true}
+                    onPin={() => setPinnedId("my-screen")}
+                    mini={true}
+                  />
+                </div>
+              )}
+              {remoteParticipants.map(
+                (participant) =>
+                  pinnedId !== participant.id && (
+                    <div
+                      key={participant.id}
+                      className="aspect-video md:h-36 lg:h-44 flex-shrink-0"
+                    >
+                      <VideoTile
+                        stream={participant.stream}
+                        name={participant.name}
+                        onPin={() => setPinnedId(participant.id)}
+                        mini={true}
+                      />
+                    </div>
+                  )
+              )}
+            </div>
           </div>
         )}
       </main>
 
-      {/* Footer Kontrol - Spacing optimized for Mobile */}
-      <footer className="h-24 md:h-28 flex items-center justify-between px-4 md:px-12 bg-[#202124] flex-shrink-0 z-20 pb-10 md:pb-0">
+      <footer className="h-20 md:h-28 flex items-center justify-between px-4 md:px-12 bg-[#202124] flex-shrink-0 z-20 pb-4 md:pb-0">
         <div className="hidden lg:flex flex-col">
           <span className="text-xl font-medium tracking-tight">
             {new Date().toLocaleTimeString([], {
@@ -736,10 +796,10 @@ const App: React.FC = () => {
           </span>
         </div>
 
-        <div className="flex items-center justify-center flex-1 md:flex-none gap-3 md:gap-5">
+        <div className="flex items-center justify-center flex-1 md:flex-none gap-2.5 md:gap-5">
           <button
             onClick={toggleMic}
-            className={`group p-3.5 md:p-5 rounded-full transition-all border border-gray-700/50 shadow-lg ${
+            className={`p-3 md:p-5 rounded-full transition-all border border-gray-700/50 shadow-lg ${
               isMicOn
                 ? "bg-[#3c4043] hover:bg-[#434649]"
                 : "bg-red-500 hover:bg-red-600 ring-4 ring-red-500/20"
@@ -754,7 +814,7 @@ const App: React.FC = () => {
 
           <button
             onClick={toggleCam}
-            className={`group p-3.5 md:p-5 rounded-full transition-all border border-gray-700/50 shadow-lg ${
+            className={`p-3 md:p-5 rounded-full transition-all border border-gray-700/50 shadow-lg ${
               isCamOn
                 ? "bg-[#3c4043] hover:bg-[#434649]"
                 : "bg-red-500 hover:bg-red-600 ring-4 ring-red-500/20"
@@ -767,10 +827,9 @@ const App: React.FC = () => {
             )}
           </button>
 
-          {/* Fix: Changed toggleScreenSharing to toggleScreenShare */}
           <button
             onClick={toggleScreenShare}
-            className={`p-3.5 md:p-5 rounded-full transition-all border border-gray-700/50 shadow-lg ${
+            className={`p-3 md:p-5 rounded-full transition-all border border-gray-700/50 shadow-lg ${
               isScreenSharing
                 ? "bg-blue-600 ring-4 ring-blue-600/20"
                 : "bg-[#3c4043] hover:bg-[#434649]"
@@ -785,7 +844,7 @@ const App: React.FC = () => {
 
           <button
             onClick={() => window.location.reload()}
-            className="p-3.5 md:p-5 rounded-full bg-red-600 hover:bg-red-700 transition-all shadow-2xl active:scale-90 flex items-center justify-center ring-4 ring-red-600/10"
+            className="p-3 md:p-5 rounded-full bg-red-600 hover:bg-red-700 transition-all shadow-2xl active:scale-90 flex items-center justify-center ring-4 ring-red-600/10"
           >
             <PhoneOff className="h-5 w-5 md:h-6 md:w-6 text-white" />
           </button>
