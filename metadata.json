@@ -1,5 +1,5 @@
 {
-  "name": "Gemini Meet Pro",
+  "name": "Fine Meet Pro",
   "description": "A high-fidelity Google Meet clone featuring real-time AI conversation, video conferencing, and screen sharing powered by Gemini Live API.",
   "requestFramePermissions": [
     "camera",
