@@ -594,7 +594,7 @@ const App: React.FC = () => {
           </div>
           <h2 className="text-2xl font-semibold">
             {twilioStatus === "connecting"
-              ? "Menghubungkan ke Twilio..."
+              ? "Menghubungkan ke Server..."
               : "Menyiapkan koneksi..."}
           </h2>
           <p className="text-gray-400">
@@ -620,12 +620,12 @@ const App: React.FC = () => {
               Rapat video premium.
               <br />
               <span className="text-gray-400 font-normal">
-                Didukung jaringan Twilio.
+                Didukung jaringan stabil.
               </span>
             </h1>
             <p className="text-base md:text-lg text-gray-400">
               Hubungkan tim Anda lintas kota dengan latensi rendah dan koneksi
-              aman yang dioptimalkan oleh Twilio.
+              aman yang dioptimalkan.
             </p>
             {error && (
               <div className="bg-red-500/10 border border-red-500/50 text-red-500 p-4 rounded-lg flex items-center gap-3 text-sm mx-auto md:mx-0 max-w-sm">
@@ -757,7 +757,7 @@ const App: React.FC = () => {
                 Meet Pro
               </span>
               <span className="text-[7px] md:text-[10px] text-blue-400 font-bold tracking-widest uppercase mt-0.5">
-                Network by Twilio
+                Network by Free
               </span>
             </div>
           </div>
@@ -789,12 +789,12 @@ const App: React.FC = () => {
               <SignalLow className="h-3 w-3" />
             )}
             {twilioStatus === "connected"
-              ? "Twilio: OK"
+              ? ""
               : twilioStatus === "error"
-                ? "Twilio: Fallback"
+                ? "Fallback"
                 : twilioStatus === "connecting"
-                  ? "Twilio: Syncing"
-                  : "Twilio: Idle"}
+                  ? "Syncing"
+                  : "Idle"}
           </div>
 
           <div className="flex items-center gap-1.5 bg-gray-800/60 backdrop-blur-md px-2.5 py-1 rounded-full border border-gray-700/50">
