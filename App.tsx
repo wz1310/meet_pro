@@ -33,7 +33,6 @@ declare const Peer: any;
 const TWILIO_SID = (import.meta as any).env.VITE_TWILIO_SID || "";
 const TWILIO_AUTH = (import.meta as any).env.VITE_TWILIO_AUTH || "";
 
-// Default ICE Servers (Google STUN) sebagai cadangan jika Twilio gagal
 const DEFAULT_ICE = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -72,8 +71,10 @@ const VideoTile = memo(
     const videoRef = useRef<HTMLVideoElement>(null);
 
     useEffect(() => {
-      if (videoRef.current && stream && videoRef.current.srcObject !== stream) {
-        videoRef.current.srcObject = stream;
+      if (videoRef.current && stream) {
+        if (videoRef.current.srcObject !== stream) {
+          videoRef.current.srcObject = stream;
+        }
       }
     }, [stream]);
 
@@ -163,8 +164,6 @@ const App: React.FC = () => {
 
   const [isRequesting, setIsRequesting] = useState(false);
   const [pendingRequests, setPendingRequests] = useState<JoinRequest[]>([]);
-
-  // State untuk melacak status Twilio
   const [twilioStatus, setTwilioStatus] = useState<
     "idle" | "connecting" | "connected" | "error"
   >("idle");
@@ -172,7 +171,9 @@ const App: React.FC = () => {
   const [meetingDuration, setMeetingDuration] = useState("00:00");
   const meetingStartTimeRef = useRef<number | null>(null);
 
-  const localStreamRef = useRef<MediaStream | null>(null);
+  // Perubahan penting: localStream sekarang menggunakan State agar UI reaktif
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null); // Tetap simpan ref untuk akses cepat di callback
   const screenStreamRef = useRef<MediaStream | null>(null);
   const peerRef = useRef<any>(null);
   const screenPeerRef = useRef<any>(null);
@@ -180,41 +181,27 @@ const App: React.FC = () => {
   const activePeersRef = useRef<Set<string>>(new Set());
   const dataConnsRef = useRef<Map<string, any>>(new Map());
 
-  // Fungsi untuk mengambil ICE Servers dari Twilio dengan logging yang detail
   const fetchTwilioIceServers = async () => {
     console.log(
       "🚀 [Twilio] Menghubungkan ke Twilio Network Traversal Service...",
     );
     setTwilioStatus("connecting");
-
     try {
       const auth = btoa(`${TWILIO_SID}:${TWILIO_AUTH}`);
       const response = await fetch(
         `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Tokens.json`,
         {
           method: "POST",
-          headers: {
-            Authorization: `Basic ${auth}`,
-          },
+          headers: { Authorization: `Basic ${auth}` },
         },
       );
-
-      if (!response.ok) {
-        throw new Error(`HTTP Error: ${response.status}`);
-      }
-
+      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
       const data = await response.json();
-      console.log(
-        "✅ [Twilio] Koneksi Berhasil! ICE Servers didapatkan:",
-        data.ice_servers,
-      );
+      console.log("✅ [Twilio] Koneksi Berhasil!");
       setTwilioStatus("connected");
       return data.ice_servers;
     } catch (err: any) {
       console.error("❌ [Twilio] Gagal mendapatkan ICE Servers:", err.message);
-      console.warn(
-        "⚠️ [Twilio] Menggunakan Google STUN sebagai cadangan (Fallback).",
-      );
       setTwilioStatus("error");
       return DEFAULT_ICE;
     }
@@ -223,20 +210,19 @@ const App: React.FC = () => {
   const resetApp = () => {
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
-      localStreamRef.current = null;
     }
     if (screenStreamRef.current) {
       screenStreamRef.current.getTracks().forEach((track) => track.stop());
-      screenStreamRef.current = null;
     }
-    if (peerRef.current) {
-      peerRef.current.destroy();
-      peerRef.current = null;
-    }
-    if (screenPeerRef.current) {
-      screenPeerRef.current.destroy();
-      screenPeerRef.current = null;
-    }
+    if (peerRef.current) peerRef.current.destroy();
+    if (screenPeerRef.current) screenPeerRef.current.destroy();
+
+    localStreamRef.current = null;
+    setLocalStream(null);
+    screenStreamRef.current = null;
+    peerRef.current = null;
+    screenPeerRef.current = null;
+
     activeCallsRef.current.clear();
     activePeersRef.current.clear();
     dataConnsRef.current.clear();
@@ -315,12 +301,8 @@ const App: React.FC = () => {
     targetId?: string,
     currentName?: string,
   ) => {
-    console.log("📡 [PeerJS] Menginisialisasi Peer dengan ICE Servers...");
     const peer = new Peer(id, {
-      config: {
-        iceServers: iceServers,
-        iceCandidatePoolSize: 10,
-      },
+      config: { iceServers: iceServers, iceCandidatePoolSize: 10 },
     });
     peerRef.current = peer;
     const nameToShare = currentName || myName;
@@ -396,7 +378,7 @@ const App: React.FC = () => {
     });
 
     peer.on("error", (err: any) => {
-      console.error("🔴 [PeerJS] Error:", err.type, err.message);
+      console.error("🔴 [PeerJS] Error:", err.type);
       if (err.type === "peer-unavailable") {
         setError("Rapat tidak ditemukan atau Host sudah keluar.");
         setIsRequesting(false);
@@ -410,34 +392,59 @@ const App: React.FC = () => {
     call.on("stream", (remoteStream: MediaStream) => {
       if (remoteStream && remoteStream.getTracks().length > 0) {
         addParticipant(remoteId, remoteStream, call.metadata?.name);
-      } else if (remoteId.includes("-screen")) {
-        removeParticipant(remoteId);
       }
     });
     call.on("close", () => removeParticipant(remoteId));
   };
 
+  // Fungsi startLocalMedia yang diperbaiki untuk transisi kamera yang seamless
   const startLocalMedia = async (mode: "user" | "environment" = facingMode) => {
+    console.log(`📸 [Media] Mengaktifkan kamera: ${mode}`);
     try {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
+      // 1. Ambil stream baru TERLEBIH DAHULU (jangan stop yang lama dulu agar tidak lag)
+      const newStream = await navigator.mediaDevices.getUserMedia({
         audio: true,
-        video: { facingMode: mode },
+        video: {
+          facingMode: mode,
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
       });
-      localStreamRef.current = stream;
 
-      if (inMeeting && peerRef.current) {
-        activeCallsRef.current.forEach((call, id) => {
-          const sender = call.peerConnection
-            .getSenders()
-            .find((s: any) => s.track.kind === "video");
-          if (sender) sender.replaceTrack(stream.getVideoTracks()[0]);
+      // 2. Jika ada koneksi aktif, ganti track video secara live (seamless replaceTrack)
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      if (activeCallsRef.current.size > 0) {
+        console.log("📡 [WebRTC] Mengganti track video untuk semua peer...");
+        activeCallsRef.current.forEach((call) => {
+          const senders = call.peerConnection.getSenders();
+          const videoSender = senders.find(
+            (s: RTCRtpSender) => s.track?.kind === "video",
+          );
+          if (videoSender && newVideoTrack) {
+            videoSender
+              .replaceTrack(newVideoTrack)
+              .catch((err) => console.error("Gagal replaceTrack:", err));
+          }
         });
       }
-      return stream;
+
+      // 3. Sekarang aman untuk mematikan track lama
+      if (localStreamRef.current) {
+        console.log("🧹 [Media] Membersihkan track kamera lama...");
+        localStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
+
+      // 4. Update track audio sesuai state mic saat ini
+      newStream.getAudioTracks()[0].enabled = isMicOn;
+      newStream.getVideoTracks()[0].enabled = isCamOn;
+
+      // 5. Update state & ref
+      localStreamRef.current = newStream;
+      setLocalStream(newStream);
+
+      return newStream;
     } catch (err) {
+      console.error("❌ [Media] Gagal akses kamera:", err);
       setError("Gagal mengakses kamera atau mikrofon.");
       throw err;
     }
@@ -542,7 +549,7 @@ const App: React.FC = () => {
     if (isScreenSharing) {
       screenStreamRef.current?.getTracks().forEach((t) => t.stop());
       screenStreamRef.current = null;
-      screenPeerRef.current?.destroy();
+      if (screenPeerRef.current) screenPeerRef.current.destroy();
       setIsScreenSharing(false);
       if (pinnedId === "my-screen") setPinnedId(null);
     } else {
@@ -554,12 +561,10 @@ const App: React.FC = () => {
         setIsScreenSharing(true);
         setPinnedId("my-screen");
         const screenPeerId = `${myId}-screen`;
-
         const iceServers = await fetchTwilioIceServers();
         const sPeer = new Peer(screenPeerId, {
           config: { iceServers: iceServers, iceCandidatePoolSize: 10 },
         });
-
         screenPeerRef.current = sPeer;
         sPeer.on("open", () => {
           if (meetingCode && myId !== meetingCode) {
@@ -594,7 +599,7 @@ const App: React.FC = () => {
           </div>
           <h2 className="text-2xl font-semibold">
             {twilioStatus === "connecting"
-              ? "Menghubungkan ke Server..."
+              ? "Menghubungkan ke Twilio..."
               : "Menyiapkan koneksi..."}
           </h2>
           <p className="text-gray-400">
@@ -620,12 +625,12 @@ const App: React.FC = () => {
               Rapat video premium.
               <br />
               <span className="text-gray-400 font-normal">
-                Didukung jaringan stabil.
+                Didukung jaringan Twilio.
               </span>
             </h1>
             <p className="text-base md:text-lg text-gray-400">
               Hubungkan tim Anda lintas kota dengan latensi rendah dan koneksi
-              aman yang dioptimalkan.
+              aman yang dioptimalkan oleh Twilio.
             </p>
             {error && (
               <div className="bg-red-500/10 border border-red-500/50 text-red-500 p-4 rounded-lg flex items-center gap-3 text-sm mx-auto md:mx-0 max-w-sm">
@@ -757,7 +762,7 @@ const App: React.FC = () => {
                 Meet Pro
               </span>
               <span className="text-[7px] md:text-[10px] text-blue-400 font-bold tracking-widest uppercase mt-0.5">
-                Network by Free
+                Network by Twilio
               </span>
             </div>
           </div>
@@ -771,7 +776,6 @@ const App: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2 md:gap-3">
-          {/* Status Twilio Visual Indicator */}
           <div
             className={`flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-bold border transition-colors ${
               twilioStatus === "connected"
@@ -789,12 +793,12 @@ const App: React.FC = () => {
               <SignalLow className="h-3 w-3" />
             )}
             {twilioStatus === "connected"
-              ? ""
+              ? "Twilio: OK"
               : twilioStatus === "error"
-                ? "Fallback"
+                ? "Twilio: Fallback"
                 : twilioStatus === "connecting"
-                  ? "Syncing"
-                  : "Idle"}
+                  ? "Twilio: Syncing"
+                  : "Twilio: Idle"}
           </div>
 
           <div className="flex items-center gap-1.5 bg-gray-800/60 backdrop-blur-md px-2.5 py-1 rounded-full border border-gray-700/50">
@@ -824,7 +828,7 @@ const App: React.FC = () => {
                 pinnedId === "my-screen"
                   ? screenStreamRef.current
                   : pinnedId === "me"
-                    ? localStreamRef.current
+                    ? localStream
                     : pinnedParticipant?.stream || null
               }
               name={
@@ -854,7 +858,7 @@ const App: React.FC = () => {
               }`}
             >
               <VideoTile
-                stream={localStreamRef.current}
+                stream={localStream}
                 name={myName}
                 isLocal={true}
                 isMicOn={isMicOn}
@@ -879,7 +883,7 @@ const App: React.FC = () => {
               {pinnedId !== "me" && (
                 <div className="aspect-video md:h-36 lg:h-44 flex-shrink-0">
                   <VideoTile
-                    stream={localStreamRef.current}
+                    stream={localStream}
                     name={myName}
                     isLocal={true}
                     isMicOn={isMicOn}
@@ -964,7 +968,7 @@ const App: React.FC = () => {
 
           <button
             onClick={switchCamera}
-            className="p-3 md:p-5 rounded-full bg-[#3c4043] hover:bg-[#434649] transition-all border border-gray-700/50 shadow-lg sm:flex items-center justify-center"
+            className="p-3 md:p-5 rounded-full bg-[#3c4043] hover:bg-[#434649] transition-all border border-gray-700/50 shadow-lg flex items-center justify-center"
           >
             <RefreshCw className="h-5 w-5 md:h-6 md:w-6 text-gray-300" />
           </button>
